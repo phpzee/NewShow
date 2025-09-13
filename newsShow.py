@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, Response, send_from_directory
 import feedparser
 from datetime import datetime, timedelta, timezone
 import email.utils
@@ -25,6 +25,8 @@ HTML_TEMPLATE = """
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NewsShow App</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#1e3c72">
 <style>
 body { font-family: Arial, sans-serif; background: #f4f6f9; margin: 0; padding: 0; }
 header { background: #1e3c72; color: white; padding: 15px; text-align: center; font-size: 1.5rem; font-weight: bold; }
@@ -33,8 +35,9 @@ header { background: #1e3c72; color: white; padding: 15px; text-align: center; f
 .controls button { padding: 8px 12px; font-size: 1rem; border-radius: 6px; background: #1e3c72; color: white; border: none; cursor: pointer; }
 .controls button:hover { background: #2a5298; }
 .container { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; padding: 20px; }
-.card { background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); padding: 20px; display: flex; flex-direction: column; justify-content: space-between; transition: transform 0.2s; }
-.card:hover { transform: translateY(-5px); }
+.card { background: linear-gradient(135deg, #ffffff, #e8f0fe); border-left: 5px solid #1e3c72; border-radius: 12px; box-shadow: 0 6px 15px rgba(0,0,0,0.15); padding: 20px; display: flex; flex-direction: column; justify-content: space-between; transition: transform 0.3s, box-shadow 0.3s; }
+.card:hover { transform: translateY(-8px); box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+.card img { width: 100%; border-radius:8px; margin-bottom:10px; }
 .title { font-size: 1.2rem; font-weight: bold; margin-bottom: 10px; color: #1e3c72; }
 .source { font-size: 0.9rem; color: #666; margin-bottom: 8px; }
 .meta { font-size: 0.85rem; color: #777; margin-bottom: 10px; }
@@ -55,6 +58,7 @@ header { background: #1e3c72; color: white; padding: 15px; text-align: center; f
 <div class="container">
 {% for news in news_items %}
 <div class="card">
+{% if news.image %}<img src="{{ news.image }}">{% endif %}
 <div class="title">{{ news.title }}</div>
 <div class="source">Source: {{ news.source }}</div>
 <div class="meta">{{ news.date }}</div>
@@ -63,9 +67,63 @@ header { background: #1e3c72; color: white; padding: 15px; text-align: center; f
 {% endfor %}
 </div>
 
+<script>
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service-worker.js')
+    .then(reg => console.log('Service Worker registered', reg))
+    .catch(err => console.log('Service Worker failed', err));
+}
+</script>
+
 </body>
 </html>
 """
+
+MANIFEST_JSON = """
+{
+  "name": "NewsShow App",
+  "short_name": "NewsShow",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f9",
+  "theme_color": "#1e3c72",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
+"""
+
+SERVICE_WORKER = """
+const CACHE_NAME = "newsshow-cache-v1";
+const urlsToCache = ["/"];
+self.addEventListener("install", event => {
+    event.waitUntil(
+        caches.open(CACHE_NAME).then(cache => cache.addAll(urlsToCache))
+    );
+});
+self.addEventListener("fetch", event => {
+    event.respondWith(
+        caches.match(event.request).then(response => response || fetch(event.request))
+    );
+});
+"""
+
+@app.route("/manifest.json")
+def manifest():
+    return Response(MANIFEST_JSON, mimetype='application/json')
+
+@app.route("/service-worker.js")
+def sw():
+    return Response(SERVICE_WORKER, mimetype='application/javascript')
 
 @app.route("/", methods=["GET"])
 def index():
@@ -80,6 +138,11 @@ def index():
         google_rss = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
         feed = feedparser.parse(google_rss)
         for entry in feed.entries[:50]:
+            img_url = ""
+            if "media_content" in entry:
+                img_url = entry.media_content[0]["url"]
+            elif "media_thumbnail" in entry:
+                img_url = entry.media_thumbnail[0]["url"]
             if "published" in entry:
                 parsed_date = email.utils.parsedate_to_datetime(entry.published)
                 if parsed_date.tzinfo is None:
@@ -93,7 +156,8 @@ def index():
                 "title": entry.title,
                 "link": entry.link,
                 "date": date_str,
-                "source": "Google News"
+                "source": "Google News",
+                "image": img_url
             })
 
         # Additional RSS feeds
@@ -103,6 +167,11 @@ def index():
                 combined_text = entry.title + (" " + entry.summary if "summary" in entry else "")
                 if keyword.lower() not in combined_text.lower():
                     continue
+                img_url = ""
+                if "media_content" in entry:
+                    img_url = entry.media_content[0]["url"]
+                elif "media_thumbnail" in entry:
+                    img_url = entry.media_thumbnail[0]["url"]
                 if "published" in entry:
                     try:
                         parsed_date = email.utils.parsedate_to_datetime(entry.published)
@@ -119,10 +188,10 @@ def index():
                     "title": entry.title,
                     "link": entry.link,
                     "date": date_str,
-                    "source": source
+                    "source": source,
+                    "image": img_url
                 })
 
-    # Sort by date descending
     all_news.sort(key=lambda x: x["date"], reverse=True)
     return render_template_string(HTML_TEMPLATE, news_items=all_news, keyword=keyword)
 
